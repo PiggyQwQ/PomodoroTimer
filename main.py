@@ -145,7 +145,9 @@ class DataManager:
 class CircularTimer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(248, 248)
+        # kept small so the layout can shrink it on short windows instead of
+        # letting it overflow onto neighbouring widgets; paintEvent self-centers
+        self.setMinimumSize(160, 160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._progress = 1.0
         self._text = "25:00"
@@ -254,9 +256,9 @@ class TimerWidget(QWidget):
             row.addWidget(btn)
         root.addLayout(row)
 
-        # circular timer
+        # circular timer — fills the cell (the disc is centered when painted)
         self._circle = CircularTimer()
-        root.addWidget(self._circle, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._circle, 1)
 
         # task input
         self._task = QLineEdit()
@@ -578,8 +580,8 @@ class MainWindow(QMainWindow):
         self.data = DataManager()
         self.setWindowTitle("番茄钟")
         self.setWindowIcon(_tomato_icon())
-        self.resize(430, 600)
-        self.setMinimumSize(390, 540)
+        self.resize(440, 640)
+        self.setMinimumSize(400, 580)
         self._setup_ui()
         self._setup_tray()
         self._apply_style()
