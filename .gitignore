@@ -14,6 +14,9 @@ fonts/*.ttf
 fonts/*.otf
 fonts/*.ttc
 
+# Local dev tooling — Claude Code skills/settings, not part of the app
+.claude/
+
 # IDE / OS
 .idea/
 .vscode/

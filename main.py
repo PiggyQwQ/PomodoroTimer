@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""番茄钟 · Desktop Pomodoro Timer (PyQt6)"""
+"""番茄钟 · Desktop Pomodoro Timer (PyQt6)
+
+UI aesthetic — "宣纸朱砂" (rice paper & vermilion): a warm paper ground with
+subtle radial depth, ink-toned text, and vermilion as the dominant accent,
+cohesive with the 汉仪心海行楷 calligraphy display font.
+"""
 
 import sys
 import json
 import os
+import math
 from datetime import datetime
 from collections import defaultdict
 
@@ -13,7 +19,9 @@ from PyQt6.QtWidgets import (
     QFormLayout, QSystemTrayIcon, QMenu, QScrollArea, QFrame,
     QSizePolicy, QDialogButtonBox,
 )
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QTimer, Qt, pyqtSignal, QRectF, QPointF, QPropertyAnimation, QEasingCurve,
+)
 from PyQt6.QtGui import (
     QFont, QFontDatabase, QPainter, QPen, QColor, QIcon, QPixmap, QAction,
 )
@@ -24,14 +32,32 @@ try:
 except ImportError:
     _HAS_SOUND = False
 
+# ── Palette ──────────────────────────────────────────────────────────────────
+# "宣纸朱砂" — warm rice-paper ground, vermilion focus accent, ink-toned text.
+
+PAPER       = "#F1E8D6"   # warm rice-paper ground
+PAPER_LIGHT = "#FBF5E7"   # raised surfaces / cards / inputs
+PAPER_SUNK  = "#E3D6BA"   # inset — the timer track
+INK         = "#2C2620"   # primary text
+INK_SOFT    = "#8A7C64"   # secondary text
+LINE        = "#D6C6A4"   # hairline borders
+VERMILION   = "#C4452C"   # 朱砂 — focus / primary accent
+JADE        = "#5B7A55"   # 短休
+INDIGO      = "#3E5871"   # 长休
+
+
+def _darken(hex_color: str, amount: int = 116) -> str:
+    """Return a darker shade of hex_color, for pressed/hover states."""
+    return QColor(hex_color).darker(amount).name()
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 DATA_FILE = os.path.expanduser("~/.pomodoro_data.json")
 FOCUS, SHORT, LONG = "focus", "short", "long"
 MODES = {
-    FOCUS: ("专注", "#E74C3C", "focus_min"),
-    SHORT: ("短休", "#27AE60", "short_min"),
-    LONG:  ("长休", "#2980B9", "long_min"),
+    FOCUS: ("专注", VERMILION, "focus_min"),
+    SHORT: ("短休", JADE,      "short_min"),
+    LONG:  ("长休", INDIGO,    "long_min"),
 }
 DEFAULTS = {"focus_min": 25, "short_min": 5, "long_min": 15, "long_after": 4}
 
@@ -39,10 +65,13 @@ DEFAULTS = {"focus_min": 25, "short_min": 5, "long_min": 15, "long_after": 4}
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_FONT = "Segoe UI"
+BODY_FONT = "Cambria"      # refined serif for body text — pairs with the
+                           # calligraphy display font and the paper aesthetic
+DIGIT_FONT = "Consolas"    # monospace timer readout — no width jitter per tick
 TITLE_FONT_FILE = "汉仪心海行楷W.ttf"   # HanYi calligraphy font, used for titles
-# Resolved at startup by load_title_font(). Falls back to UI_FONT when the
+# Resolved at startup by load_title_font(). Falls back to BODY_FONT when the
 # calligraphy font is neither bundled in fonts/ nor installed on the system.
-TITLE_FONT = UI_FONT
+TITLE_FONT = BODY_FONT
 
 
 def load_title_font() -> str:
@@ -50,7 +79,7 @@ def load_title_font() -> str:
 
     汉仪心海行楷 is a commercial typeface, so the .ttf is intentionally not
     committed to the repo (see fonts/README.md). The app degrades gracefully
-    to UI_FONT. Must be called after a QApplication exists.
+    to BODY_FONT. Must be called after a QApplication exists.
     """
     global TITLE_FONT
     bundled = os.path.join(APP_DIR, "fonts", TITLE_FONT_FILE)
@@ -116,36 +145,63 @@ class DataManager:
 class CircularTimer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(220, 220)
+        self.setMinimumSize(248, 248)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._progress = 1.0
         self._text = "25:00"
-        self._color = QColor("#E74C3C")
-        self._bg = QColor("#E8E8E8")
+        self._label = "专注"
+        self._color = QColor(VERMILION)
 
-    def set_state(self, progress: float, text: str, color: str):
+    def set_state(self, progress: float, text: str, color: str, label: str):
         self._progress = max(0.0, min(1.0, progress))
         self._text = text
         self._color = QColor(color)
+        self._label = label
         self.update()
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        side = min(self.width(), self.height()) - 20
-        x, y = (self.width() - side) // 2, (self.height() - side) // 2
-        pw = max(10, side // 14)
 
-        p.setPen(QPen(self._bg, pw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawEllipse(x, y, side, side)
+        side = min(self.width(), self.height()) - 26
+        cx, cy = self.width() / 2, self.height() / 2
+        x, y = cx - side / 2, cy - side / 2
+        pw = max(9, side / 18)
+        ring = QRectF(x, y, side, side)
 
+        # inset track
+        p.setPen(QPen(QColor(PAPER_SUNK), pw,
+                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(ring, 0, 360 * 16)
+
+        # progress arc, sweeping clockwise from the top
         if self._progress > 0.001:
-            p.setPen(QPen(self._color, pw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawArc(x, y, side, side, 90 * 16, -int(360 * 16 * self._progress))
+            p.setPen(QPen(self._color, pw,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(ring, 90 * 16, -int(360 * 16 * self._progress))
 
-        p.setPen(QPen(QColor("#2C3E50")))
-        p.setFont(QFont("Segoe UI", max(22, side // 6), QFont.Weight.Bold))
-        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+            # a filled dot marking the leading end of the arc
+            end_deg = 90 - 360 * self._progress
+            end_rad = math.radians(end_deg)
+            r = side / 2
+            dot = QPointF(cx + r * math.cos(end_rad), cy - r * math.sin(end_rad))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._color)
+            p.drawEllipse(dot, pw * 0.62, pw * 0.62)
+
+        # countdown digits — monospace, no jitter as digits change
+        p.setPen(QColor(INK))
+        p.setFont(QFont(DIGIT_FONT, max(28, int(side / 6.4))))
+        p.drawText(QRectF(0, cy - side * 0.5, self.width(), side * 0.86),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   self._text)
+
+        # mode label beneath the digits
+        p.setPen(QColor(INK_SOFT))
+        p.setFont(QFont(BODY_FONT, max(11, int(side / 22))))
+        p.drawText(QRectF(0, cy + side * 0.13, self.width(), side * 0.22),
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                   self._label)
 
 # ── Timer Tab ────────────────────────────────────────────────────────────────
 
@@ -169,24 +225,29 @@ class TimerWidget(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 8, 20, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(28, 16, 28, 22)
+        root.setSpacing(14)
 
-        # app title
+        # app title + decorative seal-rule
         title = QLabel("番茄钟")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(TITLE_FONT, 34))
-        title.setStyleSheet("color: #E74C3C;")
+        title.setFont(QFont(TITLE_FONT, 38))
+        title.setStyleSheet(f"color: {VERMILION};")
         root.addWidget(title)
 
-        # mode buttons
+        rule = QFrame()
+        rule.setFixedSize(48, 2)
+        rule.setStyleSheet(f"background: {VERMILION}; border: none;")
+        root.addWidget(rule, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # mode pills
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(10)
         self._mode_btns: dict[str, QPushButton] = {}
         for key, (name, _, _) in MODES.items():
             btn = QPushButton(name)
-            btn.setFixedHeight(34)
-            btn.setFont(QFont("Segoe UI", 13))
+            btn.setFixedHeight(36)
+            btn.setFont(QFont(BODY_FONT, 13))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, k=key: self._apply_mode(k))
             self._mode_btns[key] = btn
@@ -195,33 +256,33 @@ class TimerWidget(QWidget):
 
         # circular timer
         self._circle = CircularTimer()
-        root.addWidget(self._circle, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._circle, 1, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # task input
         self._task = QLineEdit()
-        self._task.setPlaceholderText("输入任务名称...")
-        self._task.setFixedHeight(38)
-        self._task.setFont(QFont("Segoe UI", 13))
-        self._task.setStyleSheet(
-            "border: 1.5px solid #DDD; border-radius: 8px; padding: 0 10px; background: white;"
-        )
+        self._task.setPlaceholderText("此刻专注于……")
+        self._task.setFixedHeight(40)
+        self._task.setFont(QFont(BODY_FONT, 13))
+        self._task.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._task)
 
         # control buttons
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(8)
+        ctrl.setSpacing(10)
         self._btn_start = QPushButton("开始")
-        self._btn_start.setFixedHeight(46)
-        self._btn_start.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self._btn_start.setFixedHeight(48)
+        self._btn_start.setFont(QFont(BODY_FONT, 15, QFont.Weight.Bold))
         self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_start.clicked.connect(self._toggle)
 
         self._btn_reset = QPushButton("重置")
-        self._btn_reset.setFixedHeight(46)
-        self._btn_reset.setFont(QFont("Segoe UI", 13))
+        self._btn_reset.setFixedHeight(48)
+        self._btn_reset.setFont(QFont(BODY_FONT, 13))
         self._btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_reset.setStyleSheet(
-            "background: #ECF0F1; color: #2C3E50; border-radius: 8px;"
+            f"QPushButton {{ background: transparent; color: {INK_SOFT};"
+            f" border: 1.3px solid {LINE}; border-radius: 12px; }}"
+            f"QPushButton:hover {{ color: {INK}; border-color: {INK_SOFT}; }}"
         )
         self._btn_reset.clicked.connect(self._reset)
 
@@ -232,8 +293,7 @@ class TimerWidget(QWidget):
         # today counter
         self._lbl_count = QLabel()
         self._lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_count.setFont(QFont("Segoe UI", 12))
-        self._lbl_count.setStyleSheet("color: #888;")
+        self._lbl_count.setFont(QFont(BODY_FONT, 12))
         root.addWidget(self._lbl_count)
 
         self._refresh_count()
@@ -296,28 +356,37 @@ class TimerWidget(QWidget):
             _, color, _ = MODES[k]
             if k == self._mode:
                 btn.setStyleSheet(
-                    f"background: {color}; color: white; border-radius: 8px; font-weight: bold;"
+                    f"QPushButton {{ background: {color}; color: {PAPER_LIGHT};"
+                    f" border: none; border-radius: 18px; font-weight: 600; }}"
                 )
             else:
                 btn.setStyleSheet(
-                    "background: #ECF0F1; color: #555; border-radius: 8px;"
+                    f"QPushButton {{ background: transparent; color: {INK_SOFT};"
+                    f" border: 1.3px solid {LINE}; border-radius: 18px; }}"
+                    f"QPushButton:hover {{ color: {INK}; border-color: {INK_SOFT}; }}"
                 )
 
     def _refresh_circle(self):
         m, s = self._remain_sec // 60, self._remain_sec % 60
         prog = self._remain_sec / self._total_sec if self._total_sec else 1.0
-        _, color, _ = MODES[self._mode]
-        self._circle.set_state(prog, f"{m:02d}:{s:02d}", color)
+        name, color, _ = MODES[self._mode]
+        self._circle.set_state(prog, f"{m:02d}:{s:02d}", color, name)
 
     def _refresh_count(self):
         n = self.data.today_focus_count()
         self._focus_count = max(self._focus_count, n)
-        self._lbl_count.setText(f"今日专注：{n} 个番茄 🍅")
+        self._lbl_count.setText(
+            f'<span style="color:{INK_SOFT};">今日已收获 </span>'
+            f'<span style="color:{VERMILION}; font-size:16px;">{n}</span>'
+            f'<span style="color:{INK_SOFT};"> 个番茄 🍅</span>'
+        )
 
     def _set_start_btn(self, text: str, color: str):
         self._btn_start.setText(text)
         self._btn_start.setStyleSheet(
-            f"background: {color}; color: white; border-radius: 8px;"
+            f"QPushButton {{ background: {color}; color: {PAPER_LIGHT};"
+            f" border: none; border-radius: 12px; }}"
+            f"QPushButton:hover {{ background: {_darken(color)}; }}"
         )
 
     def refresh_settings(self):
@@ -332,20 +401,28 @@ class StatsWidget(QWidget):
         self.data = data
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 12, 20, 20)
-        root.setSpacing(8)
+        root.setContentsMargins(28, 18, 28, 22)
+        root.setSpacing(10)
 
         lbl = QLabel("历史记录")
-        lbl.setFont(QFont(TITLE_FONT, 24))
-        lbl.setStyleSheet("color: #2C3E50;")
+        lbl.setFont(QFont(TITLE_FONT, 26))
+        lbl.setStyleSheet(f"color: {INK};")
         root.addWidget(lbl)
+
+        rule = QFrame()
+        rule.setFixedHeight(2)
+        rule.setStyleSheet(f"background: {LINE}; border: none;")
+        root.addWidget(rule)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._scroll.viewport().setStyleSheet("background: transparent;")
         self._content = QWidget()
+        self._content.setStyleSheet("background: transparent;")
         self._cl = QVBoxLayout(self._content)
-        self._cl.setSpacing(6)
+        self._cl.setSpacing(7)
         self._cl.addStretch()
         self._scroll.setWidget(self._content)
         root.addWidget(self._scroll)
@@ -354,12 +431,14 @@ class StatsWidget(QWidget):
         while self._cl.count() > 1:
             item = self._cl.takeAt(0)
             if item.widget():
+                item.widget().setParent(None)   # drop from view immediately
                 item.widget().deleteLater()
 
         by_date = self.data.sessions_by_date()
         if not by_date:
-            empty = QLabel("还没有记录，开始第一个番茄吧！")
-            empty.setStyleSheet("color: #AAA; font-size: 14px;")
+            empty = QLabel("还没有记录，种下第一个番茄吧 🍅")
+            empty.setFont(QFont(BODY_FONT, 13))
+            empty.setStyleSheet(f"color: {INK_SOFT};")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._cl.insertWidget(0, empty)
             return
@@ -371,25 +450,31 @@ class StatsWidget(QWidget):
             for s in focus_sessions:
                 task_counts[s["task"]] += 1
 
-            hdr = QLabel(f"{date_str}    专注 {len(focus_sessions)} 个番茄")
-            hdr.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-            hdr.setStyleSheet("color: #2C3E50; padding: 6px 0 2px 0;")
+            hdr = QLabel(
+                f'<span style="color:{INK};">{date_str}</span>'
+                f'<span style="color:{INK_SOFT};">　专注 </span>'
+                f'<span style="color:{VERMILION};">{len(focus_sessions)}</span>'
+                f'<span style="color:{INK_SOFT};"> 个</span>'
+            )
+            hdr.setFont(QFont(BODY_FONT, 13, QFont.Weight.Bold))
+            hdr.setStyleSheet("padding: 10px 0 2px 2px;")
             self._cl.insertWidget(idx, hdr)
             idx += 1
 
             for task, count in sorted(task_counts.items(), key=lambda x: -x[1]):
                 card = QFrame()
                 card.setStyleSheet(
-                    "QFrame{background:white;border-radius:8px;border:1px solid #EEE;}"
+                    f"QFrame {{ background: {PAPER_LIGHT};"
+                    f" border: 1px solid {LINE}; border-radius: 10px; }}"
                 )
                 cl = QHBoxLayout(card)
-                cl.setContentsMargins(12, 8, 12, 8)
+                cl.setContentsMargins(14, 10, 14, 10)
                 tl = QLabel(task)
-                tl.setFont(QFont("Segoe UI", 12))
-                tl.setStyleSheet("color:#2C3E50;border:none;")
+                tl.setFont(QFont(BODY_FONT, 12))
+                tl.setStyleSheet(f"color:{INK}; border:none; background:transparent;")
                 nl = QLabel(f"🍅 ×{count}")
-                nl.setFont(QFont("Segoe UI", 12))
-                nl.setStyleSheet("color:#E74C3C;border:none;")
+                nl.setFont(QFont(BODY_FONT, 12))
+                nl.setStyleSheet(f"color:{VERMILION}; border:none; background:transparent;")
                 cl.addWidget(tl)
                 cl.addStretch()
                 cl.addWidget(nl)
@@ -402,19 +487,44 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedWidth(290)
+        self.setFixedWidth(300)
         self.setModal(True)
+        self.setStyleSheet(f"""
+            QDialog {{ background: {PAPER}; }}
+            QLabel {{ color: {INK}; font-family: '{BODY_FONT}'; font-size: 13px; }}
+            QSpinBox {{
+                background: {PAPER_LIGHT}; border: 1.3px solid {LINE};
+                border-radius: 8px; padding: 3px 8px; color: {INK};
+                font-family: '{BODY_FONT}'; font-size: 13px;
+            }}
+            QSpinBox:focus {{ border-color: {VERMILION}; }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 16px; border: none; background: transparent;
+            }}
+            QPushButton {{
+                background: {PAPER_LIGHT}; border: 1.3px solid {LINE};
+                border-radius: 8px; padding: 6px 18px; color: {INK};
+                font-family: '{BODY_FONT}'; font-size: 13px;
+            }}
+            QPushButton:hover {{ border-color: {INK_SOFT}; }}
+            QPushButton:default {{
+                background: {VERMILION}; color: {PAPER_LIGHT};
+                border-color: {VERMILION};
+            }}
+            QPushButton:default:hover {{ background: {_darken(VERMILION)}; }}
+        """)
 
         form = QFormLayout(self)
-        form.setSpacing(12)
-        form.setContentsMargins(20, 20, 20, 20)
+        form.setSpacing(14)
+        form.setContentsMargins(24, 24, 24, 22)
 
         def spin(val: int, lo: int, hi: int, suffix: str) -> QSpinBox:
             s = QSpinBox()
             s.setRange(lo, hi)
             s.setValue(val)
             s.setSuffix(suffix)
-            s.setFixedHeight(34)
+            s.setFixedHeight(36)
+            s.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
             return s
 
         self._focus = spin(settings["focus_min"], 1, 60, " 分钟")
@@ -446,9 +556,19 @@ class SettingsDialog(QDialog):
 
 # ── Main Window ──────────────────────────────────────────────────────────────
 
-def _make_icon(color: str) -> QIcon:
-    px = QPixmap(32, 32)
-    px.fill(QColor(color))
+def _tomato_icon() -> QIcon:
+    """A small painted tomato — vermilion body with a jade calyx."""
+    px = QPixmap(64, 64)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(VERMILION))
+    p.drawEllipse(QRectF(7, 20, 50, 40))
+    p.setBrush(QColor(JADE))
+    p.drawEllipse(QRectF(20, 8, 14, 12))
+    p.drawEllipse(QRectF(30, 8, 14, 12))
+    p.end()
     return QIcon(px)
 
 
@@ -457,16 +577,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.data = DataManager()
         self.setWindowTitle("番茄钟")
-        self.resize(420, 580)
-        self.setMinimumSize(380, 520)
+        self.setWindowIcon(_tomato_icon())
+        self.resize(430, 600)
+        self.setMinimumSize(390, 540)
         self._setup_ui()
         self._setup_tray()
         self._apply_style()
+        self._play_intro()
 
     def _setup_ui(self):
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
-        tabs.setFont(QFont("Segoe UI", 13))
 
         self._timer = TimerWidget(self.data)
         self._timer.session_done.connect(self._on_session_done)
@@ -483,7 +604,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(tabs)
 
     def _setup_tray(self):
-        self._tray = QSystemTrayIcon(_make_icon("#E74C3C"), self)
+        self._tray = QSystemTrayIcon(_tomato_icon(), self)
         menu = QMenu()
         menu.addAction("显示窗口", self._show_window)
         menu.addSeparator()
@@ -502,20 +623,73 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._show_window()
 
+    def _play_intro(self):
+        """A single, well-orchestrated page-load: a soft fade-in on first show."""
+        self.setWindowOpacity(0.0)
+        self._intro = QPropertyAnimation(self, b"windowOpacity")
+        self._intro.setDuration(460)
+        self._intro.setStartValue(0.0)
+        self._intro.setEndValue(1.0)
+        self._intro.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._intro.start()
+
     def _apply_style(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background: #FAFAFA; font-family: 'Segoe UI'; }
-            QTabWidget::pane { border: none; }
-            QTabBar::tab {
-                padding: 8px 22px; font-size: 13px; color: #999;
-                border-bottom: 2px solid transparent;
-            }
-            QTabBar::tab:selected { color: #2C3E50; border-bottom-color: #E74C3C; }
-            QMenuBar { background: #FAFAFA; }
-            QMenuBar::item { padding: 4px 12px; }
-            QMenuBar::item:selected { background: #ECF0F1; border-radius: 4px; }
-            QScrollBar:vertical { width: 6px; background: transparent; }
-            QScrollBar::handle:vertical { background: #CCC; border-radius: 3px; }
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background: qradialgradient(cx:0.5, cy:0.28, radius:1.2,
+                    fx:0.5, fy:0.22, stop:0 #F8F1DF, stop:1 #E6D8BA);
+            }}
+            TimerWidget, StatsWidget {{ background: transparent; }}
+            QTabWidget::pane {{ border: none; background: transparent; }}
+            QTabBar {{ qproperty-drawBase: 0; background: transparent; }}
+            QTabBar::tab {{
+                background: transparent;
+                padding: 9px 26px; margin-right: 2px;
+                color: {INK_SOFT};
+                border: none; border-bottom: 2px solid transparent;
+                font-family: '{BODY_FONT}'; font-size: 14px;
+            }}
+            QTabBar::tab:selected {{
+                color: {VERMILION}; border-bottom: 2px solid {VERMILION};
+            }}
+            QTabBar::tab:hover:!selected {{ color: {INK}; }}
+            QMenuBar {{ background: transparent; }}
+            QMenuBar::item {{
+                padding: 5px 14px; color: {INK_SOFT};
+                font-family: '{BODY_FONT}'; background: transparent;
+            }}
+            QMenuBar::item:selected {{
+                background: {PAPER_LIGHT}; border-radius: 6px; color: {VERMILION};
+            }}
+            QMenu {{
+                background: {PAPER_LIGHT}; border: 1px solid {LINE}; padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px; color: {INK}; font-family: '{BODY_FONT}';
+            }}
+            QMenu::item:selected {{
+                background: {PAPER}; color: {VERMILION}; border-radius: 4px;
+            }}
+            QLineEdit {{
+                background: {PAPER_LIGHT}; border: 1.4px solid {LINE};
+                border-radius: 10px; padding: 0 12px; color: {INK};
+                selection-background-color: {VERMILION};
+                selection-color: {PAPER_LIGHT};
+            }}
+            QLineEdit:focus {{ border: 1.4px solid {VERMILION}; }}
+            QScrollBar:vertical {{
+                width: 7px; background: transparent; margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {LINE}; border-radius: 3px; min-height: 32px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {INK_SOFT}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+            QToolTip {{
+                background: {INK}; color: {PAPER};
+                border: none; padding: 5px 8px;
+            }}
         """)
 
     def _on_session_done(self, task: str, mode: str, minutes: int):
@@ -549,6 +723,7 @@ if __name__ == "__main__":
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)
     load_title_font()
+    app.setFont(QFont(BODY_FONT, 10))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
