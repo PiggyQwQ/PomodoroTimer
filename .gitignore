@@ -9,6 +9,11 @@ env/
 # Pomodoro runtime data (stored in user home, but ignore if copied here)
 .pomodoro_data.json
 
+# Commercial title font — not redistributable, must not be committed
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc
+
 # IDE / OS
 .idea/
 .vscode/

@@ -14,7 +14,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QDialogButtonBox,
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPainter, QPen, QColor, QIcon, QPixmap, QAction
+from PyQt6.QtGui import (
+    QFont, QFontDatabase, QPainter, QPen, QColor, QIcon, QPixmap, QAction,
+)
 
 try:
     import winsound
@@ -32,6 +34,37 @@ MODES = {
     LONG:  ("长休", "#2980B9", "long_min"),
 }
 DEFAULTS = {"focus_min": 25, "short_min": 5, "long_min": 15, "long_after": 4}
+
+# ── Fonts ────────────────────────────────────────────────────────────────────
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+UI_FONT = "Segoe UI"
+TITLE_FONT_FILE = "汉仪心海行楷W.ttf"   # HanYi calligraphy font, used for titles
+# Resolved at startup by load_title_font(). Falls back to UI_FONT when the
+# calligraphy font is neither bundled in fonts/ nor installed on the system.
+TITLE_FONT = UI_FONT
+
+
+def load_title_font() -> str:
+    """Resolve the title font family, preferring a bundled copy then the system.
+
+    汉仪心海行楷 is a commercial typeface, so the .ttf is intentionally not
+    committed to the repo (see fonts/README.md). The app degrades gracefully
+    to UI_FONT. Must be called after a QApplication exists.
+    """
+    global TITLE_FONT
+    bundled = os.path.join(APP_DIR, "fonts", TITLE_FONT_FILE)
+    if os.path.exists(bundled):
+        fid = QFontDatabase.addApplicationFont(bundled)
+        families = QFontDatabase.applicationFontFamilies(fid)
+        if families:
+            TITLE_FONT = families[0]
+            return TITLE_FONT
+    for family in QFontDatabase.families():
+        if family.startswith("汉仪心海行楷"):
+            TITLE_FONT = family
+            return TITLE_FONT
+    return TITLE_FONT
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -138,6 +171,13 @@ class TimerWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 8, 20, 16)
         root.setSpacing(10)
+
+        # app title
+        title = QLabel("番茄钟")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setFont(QFont(TITLE_FONT, 34))
+        title.setStyleSheet("color: #E74C3C;")
+        root.addWidget(title)
 
         # mode buttons
         row = QHBoxLayout()
@@ -296,7 +336,7 @@ class StatsWidget(QWidget):
         root.setSpacing(8)
 
         lbl = QLabel("历史记录")
-        lbl.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        lbl.setFont(QFont(TITLE_FONT, 24))
         lbl.setStyleSheet("color: #2C3E50;")
         root.addWidget(lbl)
 
@@ -508,6 +548,7 @@ if __name__ == "__main__":
     app.setApplicationName("番茄钟")
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)
+    load_title_font()
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
