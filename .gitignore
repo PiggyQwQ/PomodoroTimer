@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Pomodoro runtime data (stored in user home, but ignore if copied here)
+.pomodoro_data.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
